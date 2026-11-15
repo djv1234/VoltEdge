@@ -21,7 +21,6 @@ from grid_client import (
     DEFAULT_REGION,
     HORIZON_HOURS,
     REGIONS,
-    STRESS_THRESHOLD,
     GridForecast,
     UnknownRegionError,
     build_grid_client,
@@ -76,7 +75,6 @@ class GridSummary(BaseModel):
     max_carbon_g_kwh: float
     peak_carbon_local_timestamp: datetime
     stressed_hours: int
-    stress_threshold: float
 
 
 class GridMetricsResponse(BaseModel):
@@ -200,7 +198,7 @@ def _grid_hour(point: Any) -> GridHour:
         price_usd_mwh=point.price_usd_mwh,
         carbon_g_kwh=point.carbon_g_kwh,
         stress_score=point.stress_score,
-        stress_level=classify_stress(point.stress_score),
+        stress_level=classify_stress(point.stress_score, point.is_stressed),
         is_stressed=point.is_stressed,
         price_estimated=point.price_estimated,
         carbon_estimated=point.carbon_estimated,
@@ -256,7 +254,6 @@ def grid_metrics(
         max_carbon_g_kwh=max(carbon),
         peak_carbon_local_timestamp=forecast.points[peak_carbon_index].local_timestamp,
         stressed_hours=sum(forecast.stressed),
-        stress_threshold=STRESS_THRESHOLD,
     )
     return GridMetricsResponse(
         region=forecast.region,

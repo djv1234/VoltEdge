@@ -31,7 +31,9 @@ logger = logging.getLogger("voltedge.grid")
 HORIZON_HOURS = 24
 STRESS_PRICE_WEIGHT = 0.6
 STRESS_CARBON_WEIGHT = 0.4
-STRESS_THRESHOLD = 0.5
+DEFAULT_STRESSED_HOURS = 5
+MIN_STRESSED_HOURS = 4
+MAX_STRESSED_HOURS = 6
 
 
 class UnknownRegionError(ValueError):
@@ -255,11 +257,36 @@ def compute_stress_scores(prices: list[float], carbon: list[float]) -> list[floa
     ]
 
 
-def classify_stress(score: float) -> str:
-    """Translate a stress score into a label for dashboards and API consumers."""
-    if score >= 0.75:
-        return "critical"
-    if score >= STRESS_THRESHOLD:
+def stressed_hour_count() -> int:
+    """Number of hours per 24-hour window that count as stressed.
+
+    Defaults to 5. ``VOLTEDGE_STRESSED_HOURS`` overrides it within the 4 to 6 range.
+    """
+    raw = os.getenv("VOLTEDGE_STRESSED_HOURS", "").strip()
+    if not raw:
+        return DEFAULT_STRESSED_HOURS
+    try:
+        count = int(raw)
+    except ValueError:
+        logger.warning("VOLTEDGE_STRESSED_HOURS='%s' is not a whole number. Using %d.", raw, DEFAULT_STRESSED_HOURS)
+        return DEFAULT_STRESSED_HOURS
+    return min(max(count, MIN_STRESSED_HOURS), MAX_STRESSED_HOURS)
+
+
+def flag_stressed_hours(scores: list[float], count: int) -> list[bool]:
+    """Flag the ``count`` hours with the highest stress scores.
+
+    Ties resolve to the earliest hour. Hours with a score of zero never count
+    as stressed, so a completely flat window has no stressed hours.
+    """
+    ranked = sorted(range(len(scores)), key=lambda index: (-scores[index], index))
+    chosen = {index for index in ranked[: max(count, 0)] if scores[index] > 0}
+    return [index in chosen for index in range(len(scores))]
+
+
+def classify_stress(score: float, is_stressed: bool) -> str:
+    """Translate an hour's stress into a label for dashboards and API consumers."""
+    if is_stressed:
         return "high"
     if score >= 0.25:
         return "moderate"
@@ -330,10 +357,11 @@ class GridClient:
         prices = [point.price_usd_mwh for point in raw_points]
         carbon = [point.carbon_g_kwh for point in raw_points]
         scores = compute_stress_scores(prices, carbon)
+        stressed_flags = flag_stressed_hours(scores, stressed_hour_count())
         zone = ZoneInfo(profile.timezone)
 
         points: list[GridPoint] = []
-        for raw, score in zip(raw_points, scores):
+        for raw, score, is_stressed in zip(raw_points, scores, stressed_flags):
             local = raw.timestamp.astimezone(zone)
             points.append(
                 GridPoint(
@@ -343,7 +371,7 @@ class GridClient:
                     price_usd_mwh=raw.price_usd_mwh,
                     carbon_g_kwh=raw.carbon_g_kwh,
                     stress_score=score,
-                    is_stressed=score >= STRESS_THRESHOLD,
+                    is_stressed=is_stressed,
                     price_estimated=raw.price_estimated,
                     carbon_estimated=raw.carbon_estimated,
                 )

@@ -75,6 +75,10 @@ whether the GPUs run.
 * Constraint: `sum(x_t) == required_hours`.
 * Constraint: `x_t == 0` for every hour at or after the deadline.
 
+A stressed grid hour is one of the 5 hours in the 24-hour window with the
+highest stress score, where the score blends normalized price (60%) and
+normalized carbon intensity (40%). `VOLTEDGE_STRESSED_HOURS` accepts 4, 5, or 6.
+
 The savings metrics compare the optimized schedule against a baseline that
 starts the job immediately and runs it without pausing.
 

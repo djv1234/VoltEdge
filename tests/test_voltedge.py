@@ -111,8 +111,7 @@ def test_simulation_dips_overnight_and_spikes_in_the_evening():
     carbon_peak_hour = max(by_hour, key=lambda hour: by_hour[hour].carbon_g_kwh)
     assert 16 <= carbon_peak_hour <= 20
     stressed_hours = {hour for hour, point in by_hour.items() if point.is_stressed}
-    assert {17, 18, 19} <= stressed_hours
-    assert stressed_hours <= set(range(15, 22))
+    assert stressed_hours == {16, 17, 18, 19, 20}
     again = GridClient().get_forecast("CAISO", start=start)
     assert again.prices == forecast.prices
 
@@ -129,6 +128,22 @@ def test_grid_client_falls_back_when_live_provider_fails():
     assert len(forecast.points) == 24
     with pytest.raises(UnknownRegionError):
         GridClient().get_forecast("ATLANTIS")
+
+
+def test_stressed_hours_are_the_top_ranked_hours(monkeypatch):
+    import grid_client
+
+    scores = [0.1, 0.9, 0.9, 0.0, 0.5, 0.7, 0.3, 0.2]
+    assert grid_client.flag_stressed_hours(scores, 3) == [False, True, True, False, False, True, False, False]
+    assert grid_client.flag_stressed_hours([0.0] * 24, 5) == [False] * 24
+
+    monkeypatch.delenv("VOLTEDGE_STRESSED_HOURS", raising=False)
+    assert grid_client.stressed_hour_count() == 5
+    for raw, expected in (("4", 4), ("6", 6), ("12", 6), ("1", 4), ("many", 5)):
+        monkeypatch.setenv("VOLTEDGE_STRESSED_HOURS", raw)
+        assert grid_client.stressed_hour_count() == expected
+    monkeypatch.setenv("VOLTEDGE_STRESSED_HOURS", "4")
+    assert sum(GridClient().get_forecast("CAISO").stressed) == 4
 
 
 def _live_provider(prices, fuel_mix):
