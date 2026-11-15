@@ -39,6 +39,8 @@ GRID_LOG_COLUMNS: tuple[str, ...] = (
     "carbon_g_kwh",
     "stress_score",
     "is_stressed",
+    "price_estimated",
+    "carbon_estimated",
     "source",
 )
 
@@ -201,6 +203,8 @@ class SQLiteDatabase(Database):
                     carbon_g_kwh REAL NOT NULL,
                     stress_score REAL NOT NULL,
                     is_stressed INTEGER NOT NULL,
+                    price_estimated INTEGER NOT NULL DEFAULT 0,
+                    carbon_estimated INTEGER NOT NULL DEFAULT 0,
                     source TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE (region, ts)
@@ -226,6 +230,16 @@ class SQLiteDatabase(Database):
                 );
                 """
             )
+            # Databases created before the estimate flags existed need the columns added.
+            existing = {
+                row["name"]
+                for row in self._connection.execute(f"PRAGMA table_info({GRID_LOGS_TABLE})").fetchall()
+            }
+            for column in ("price_estimated", "carbon_estimated"):
+                if column not in existing:
+                    self._connection.execute(
+                        f"ALTER TABLE {GRID_LOGS_TABLE} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                    )
             self._connection.commit()
 
     @staticmethod
@@ -242,7 +256,8 @@ class SQLiteDatabase(Database):
     @staticmethod
     def _decode_grid_log(record: sqlite3.Row) -> dict[str, Any]:
         row = dict(record)
-        row["is_stressed"] = bool(row["is_stressed"])
+        for column in ("is_stressed", "price_estimated", "carbon_estimated"):
+            row[column] = bool(row[column])
         return row
 
     def upsert_grid_logs(self, rows: list[dict[str, Any]]) -> int:
@@ -260,19 +275,24 @@ class SQLiteDatabase(Database):
                     float(clean["carbon_g_kwh"]),
                     float(clean["stress_score"]),
                     1 if clean["is_stressed"] else 0,
+                    1 if clean["price_estimated"] else 0,
+                    1 if clean["carbon_estimated"] else 0,
                     clean["source"],
                     created_at,
                 )
             )
         statement = f"""
             INSERT INTO {GRID_LOGS_TABLE}
-                (region, ts, price_usd_mwh, carbon_g_kwh, stress_score, is_stressed, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (region, ts, price_usd_mwh, carbon_g_kwh, stress_score, is_stressed,
+                 price_estimated, carbon_estimated, source, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (region, ts) DO UPDATE SET
                 price_usd_mwh = excluded.price_usd_mwh,
                 carbon_g_kwh = excluded.carbon_g_kwh,
                 stress_score = excluded.stress_score,
                 is_stressed = excluded.is_stressed,
+                price_estimated = excluded.price_estimated,
+                carbon_estimated = excluded.carbon_estimated,
                 source = excluded.source
         """
         try:

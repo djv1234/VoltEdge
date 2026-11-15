@@ -9,6 +9,8 @@ create table if not exists public.grid_logs (
     carbon_g_kwh double precision not null,
     stress_score double precision not null,
     is_stressed boolean not null,
+    price_estimated boolean not null default false,
+    carbon_estimated boolean not null default false,
     source text not null,
     created_at timestamptz not null default now(),
     constraint grid_logs_region_ts_key unique (region, ts)

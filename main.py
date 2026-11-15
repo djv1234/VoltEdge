@@ -22,9 +22,9 @@ from grid_client import (
     HORIZON_HOURS,
     REGIONS,
     STRESS_THRESHOLD,
-    GridClient,
     GridForecast,
     UnknownRegionError,
+    build_grid_client,
     classify_stress,
 )
 from solver import InfeasibleScheduleError, ScheduleInputError, optimize_schedule
@@ -44,7 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-grid_client = GridClient()
+grid_client = build_grid_client()
 
 
 class RegionInfo(BaseModel):
@@ -62,6 +62,8 @@ class GridHour(BaseModel):
     stress_score: float
     stress_level: str
     is_stressed: bool
+    price_estimated: bool
+    carbon_estimated: bool
 
 
 class GridSummary(BaseModel):
@@ -82,6 +84,9 @@ class GridMetricsResponse(BaseModel):
     region_name: str
     timezone: str
     source: str
+    source_notice: str | None
+    estimated_price_hours: int
+    estimated_carbon_hours: int
     generated_at: datetime
     current: GridHour
     forecast: list[GridHour]
@@ -111,6 +116,8 @@ class ScheduleHour(BaseModel):
     carbon_g_kwh: float
     stress_score: float
     is_stressed: bool
+    price_estimated: bool
+    carbon_estimated: bool
     run: int
     baseline_run: int
 
@@ -134,6 +141,9 @@ class OptimizeResponse(BaseModel):
     region_name: str
     timezone: str
     source: str
+    source_notice: str | None
+    estimated_price_hours: int
+    estimated_carbon_hours: int
     generated_at: datetime
     horizon_start: datetime
     required_hours: int
@@ -168,6 +178,8 @@ def _persist_grid_logs(forecast: GridForecast) -> bool:
             "carbon_g_kwh": point.carbon_g_kwh,
             "stress_score": point.stress_score,
             "is_stressed": point.is_stressed,
+            "price_estimated": point.price_estimated,
+            "carbon_estimated": point.carbon_estimated,
             "source": forecast.source,
         }
         for point in forecast.points
@@ -190,6 +202,8 @@ def _grid_hour(point: Any) -> GridHour:
         stress_score=point.stress_score,
         stress_level=classify_stress(point.stress_score),
         is_stressed=point.is_stressed,
+        price_estimated=point.price_estimated,
+        carbon_estimated=point.carbon_estimated,
     )
 
 
@@ -206,7 +220,7 @@ def health() -> dict[str, Any]:
         "status": "ok",
         "storage_backend": database.backend_name,
         "storage_reachable": database.ping(),
-        "grid_source": grid_client.get_forecast(DEFAULT_REGION, hours=1).source,
+        "grid_source": grid_client.provider_name,
     }
 
 
@@ -249,6 +263,9 @@ def grid_metrics(
         region_name=forecast.region_name,
         timezone=forecast.timezone,
         source=forecast.source,
+        source_notice=forecast.notice,
+        estimated_price_hours=sum(point.price_estimated for point in forecast.points),
+        estimated_carbon_hours=sum(point.carbon_estimated for point in forecast.points),
         generated_at=forecast.generated_at,
         current=hours[0],
         forecast=hours,
@@ -333,6 +350,8 @@ def schedule_optimize(request: OptimizeRequest) -> OptimizeResponse:
             carbon_g_kwh=point.carbon_g_kwh,
             stress_score=point.stress_score,
             is_stressed=point.is_stressed,
+            price_estimated=point.price_estimated,
+            carbon_estimated=point.carbon_estimated,
             run=run,
             baseline_run=baseline_run,
         )
@@ -344,6 +363,9 @@ def schedule_optimize(request: OptimizeRequest) -> OptimizeResponse:
         region_name=forecast.region_name,
         timezone=forecast.timezone,
         source=forecast.source,
+        source_notice=forecast.notice,
+        estimated_price_hours=sum(point.price_estimated for point in forecast.points),
+        estimated_carbon_hours=sum(point.carbon_estimated for point in forecast.points),
         generated_at=forecast.generated_at,
         horizon_start=horizon_start,
         required_hours=request.required_hours,

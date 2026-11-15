@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -25,6 +25,8 @@ def api_client(tmp_path, monkeypatch):
     database.reset_database()
     import main
 
+    # Keep the tests offline even when the developer's .env enables live data.
+    monkeypatch.setattr(main, "grid_client", GridClient())
     yield TestClient(main.app)
     database.reset_database()
 
@@ -129,6 +131,64 @@ def test_grid_client_falls_back_when_live_provider_fails():
         GridClient().get_forecast("ATLANTIS")
 
 
+def _live_provider(prices, fuel_mix):
+    import live_provider
+
+    return live_provider.CaisoLiveProvider(
+        eia_api_key="test-key",
+        price_fetcher=lambda start, end: prices,
+        fuel_mix_fetcher=lambda: fuel_mix,
+    )
+
+
+def test_carbon_intensity_from_fuel_mix():
+    import live_provider
+
+    mix = {"NG": 500.0, "SUN": 400.0, "NUC": 100.0, "OTH": 900.0, "WND": -20.0}
+    expected = 500.0 * live_provider.EMISSION_FACTORS_G_PER_KWH["NG"] / 1000.0
+    assert live_provider.carbon_intensity_from_mix(mix) == pytest.approx(expected)
+    assert live_provider.carbon_intensity_from_mix({"OTH": 100.0}) is None
+    assert live_provider.carbon_intensity_from_mix({}) is None
+
+
+def test_live_provider_marks_estimated_hours():
+    start = datetime(2026, 11, 15, 23, 0, tzinfo=timezone.utc)
+    # Prices are published for the first 9 hours of the window plus the whole previous day.
+    prices = {start + timedelta(hours=offset): 40.0 + offset for offset in range(-24, 9)}
+    # Fuel mix data ends 16 hours before the window starts.
+    fuel_mix = {
+        start + timedelta(hours=offset): {"NG": 100.0, "SUN": 100.0} for offset in range(-48, -16)
+    }
+    forecast = GridClient(provider=_live_provider(prices, fuel_mix)).get_forecast("CAISO", start=start)
+
+    assert forecast.source.startswith("live")
+    assert forecast.notice is None
+    assert [point.price_estimated for point in forecast.points] == [False] * 9 + [True] * 15
+    assert forecast.points[0].price_usd_mwh == 40.0
+    # Hour 9 reuses the same hour of the previous day: offset 9 - 24 = -15.
+    assert forecast.points[9].price_usd_mwh == 25.0
+    assert all(point.carbon_estimated for point in forecast.points)
+    assert all(point.carbon_g_kwh == 220.0 for point in forecast.points)
+
+
+def test_live_provider_failures_fall_back_to_simulation():
+    import live_provider
+
+    start = datetime(2026, 11, 15, 23, 0, tzinfo=timezone.utc)
+    stale_prices = {start - timedelta(days=30): 40.0}
+    fuel_mix = {start - timedelta(hours=20): {"NG": 100.0}}
+    forecast = GridClient(provider=_live_provider(stale_prices, fuel_mix)).get_forecast("CAISO", start=start)
+    assert forecast.source == "simulation"
+    assert "Live grid data is unavailable" in forecast.notice
+
+    other_region = GridClient(provider=_live_provider({}, {})).get_forecast("ERCOT", start=start)
+    assert other_region.source == "simulation"
+    assert "CAISO only" in other_region.notice
+
+    with pytest.raises(live_provider.LiveDataError):
+        live_provider.CaisoLiveProvider(eia_api_key="")
+
+
 def test_database_falls_back_to_sqlite(tmp_path, monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://invalid.invalid")
     monkeypatch.setenv("SUPABASE_KEY", "not-a-real-key")
@@ -144,6 +204,8 @@ def test_database_falls_back_to_sqlite(tmp_path, monkeypatch):
         "carbon_g_kwh": 250.0,
         "stress_score": 0.2,
         "is_stressed": False,
+        "price_estimated": False,
+        "carbon_estimated": True,
         "source": "simulation",
     }
     assert db.upsert_grid_logs([row]) == 1

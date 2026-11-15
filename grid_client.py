@@ -2,12 +2,12 @@
 
 ``GridClient`` returns hourly locational marginal pricing (LMP, USD/MWh) and
 carbon intensity (gCO2/kWh) for a region. It reads from a pluggable
-``GridDataProvider``. The only provider shipped here is ``SimulatedGridProvider``,
-which generates realistic diurnal curves so the platform runs with no API key.
+``GridDataProvider``. ``SimulatedGridProvider`` generates realistic diurnal
+curves so the platform runs with no API key. ``live_provider.CaisoLiveProvider``
+reads real CAISO prices and EIA fuel mix data when ``EIA_API_KEY`` is set.
 
-To connect a live market feed, implement ``GridDataProvider.fetch`` and pass the
-provider to ``GridClient``. If the live provider raises, the client falls back
-to the simulation automatically.
+If a live provider raises, the client falls back to the simulation
+automatically and records the reason in ``GridForecast.notice``.
 
 All simulation parameters below are illustrative. They are not measured market
 data for the named regions.
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -114,6 +115,8 @@ class RawGridPoint:
     timestamp: datetime
     price_usd_mwh: float
     carbon_g_kwh: float
+    price_estimated: bool = False
+    carbon_estimated: bool = False
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,8 @@ class GridPoint:
     carbon_g_kwh: float
     stress_score: float
     is_stressed: bool
+    price_estimated: bool = False
+    carbon_estimated: bool = False
 
 
 @dataclass(frozen=True)
@@ -139,6 +144,7 @@ class GridForecast:
     source: str
     generated_at: datetime
     points: list[GridPoint]
+    notice: str | None = None
 
     @property
     def prices(self) -> list[float]:
@@ -276,6 +282,11 @@ class GridClient:
         self._simulator = SimulatedGridProvider()
         self._provider: GridDataProvider = provider if provider is not None else self._simulator
 
+    @property
+    def provider_name(self) -> str:
+        """Name of the configured data source. A live source can still fall back per request."""
+        return self._provider.source_name
+
     @staticmethod
     def _validate(points: list[RawGridPoint], hours: int) -> None:
         if len(points) != hours:
@@ -302,6 +313,7 @@ class GridClient:
         window_start = reference.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
 
         source = self._provider.source_name
+        notice: str | None = None
         try:
             raw_points = self._provider.fetch(profile, window_start, hours)
             self._validate(raw_points, hours)
@@ -312,6 +324,7 @@ class GridClient:
                 "Grid provider '%s' failed (%s). Falling back to simulation.", source, exc
             )
             raw_points = self._simulator.fetch(profile, window_start, hours)
+            notice = f"Live grid data is unavailable, so the simulation is in use. Reason: {exc}"
             source = self._simulator.source_name
 
         prices = [point.price_usd_mwh for point in raw_points]
@@ -331,6 +344,8 @@ class GridClient:
                     carbon_g_kwh=raw.carbon_g_kwh,
                     stress_score=score,
                     is_stressed=score >= STRESS_THRESHOLD,
+                    price_estimated=raw.price_estimated,
+                    carbon_estimated=raw.carbon_estimated,
                 )
             )
 
@@ -341,4 +356,27 @@ class GridClient:
             source=source,
             generated_at=now,
             points=points,
+            notice=notice,
         )
+
+
+def build_grid_client() -> GridClient:
+    """Create the grid client configured by the environment.
+
+    Live data is used when ``EIA_API_KEY`` is set, unless
+    ``VOLTEDGE_GRID_SOURCE=simulation`` forces the simulation.
+    """
+    mode = os.getenv("VOLTEDGE_GRID_SOURCE", "auto").strip().lower()
+    api_key = os.getenv("EIA_API_KEY", "").strip()
+    if mode == "simulation" or not api_key:
+        logger.info("Grid data source: simulation.")
+        return GridClient()
+    try:
+        from live_provider import build_live_provider
+
+        provider = build_live_provider()
+    except Exception as exc:
+        logger.warning("Live grid provider is unavailable (%s). Using simulation.", exc)
+        return GridClient()
+    logger.info("Grid data source: %s.", provider.source_name)
+    return GridClient(provider=provider)

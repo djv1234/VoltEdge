@@ -17,7 +17,7 @@ import requests
 import streamlit as st
 
 API_URL = os.getenv("VOLTEDGE_API_URL", "http://localhost:8000").rstrip("/")
-REQUEST_TIMEOUT_SECONDS = 15
+REQUEST_TIMEOUT_SECONDS = 90
 
 PRICE_COLOR = "#2a78d6"
 CARBON_COLOR = "#eb6834"
@@ -123,6 +123,8 @@ def build_hourly_frame(schedule: dict[str, Any]) -> pd.DataFrame:
                 "carbon": float(hour["carbon_g_kwh"]),
                 "stress_score": float(hour["stress_score"]),
                 "is_stressed": bool(hour["is_stressed"]),
+                "price_estimated": bool(hour.get("price_estimated", False)),
+                "carbon_estimated": bool(hour.get("carbon_estimated", False)),
                 "run": int(hour["run"]),
                 "baseline_run": int(hour["baseline_run"]),
             }
@@ -186,8 +188,13 @@ def build_chart(frame: pd.DataFrame, deadline_hours: int) -> go.Figure:
             yaxis="y",
             mode="lines+markers",
             line={"color": PRICE_COLOR, "width": 2},
-            marker={"size": 6, "symbol": "circle"},
-            hovertemplate="$%{y:.2f}/MWh<extra>Price</extra>",
+            marker={
+                "size": 7,
+                "symbol": ["circle-open" if flag else "circle" for flag in frame["price_estimated"]],
+                "line": {"width": 1.5, "color": PRICE_COLOR},
+            },
+            customdata=[" (estimated)" if flag else "" for flag in frame["price_estimated"]],
+            hovertemplate="$%{y:.2f}/MWh%{customdata}<extra>Price</extra>",
         )
     )
     figure.add_trace(
@@ -198,8 +205,13 @@ def build_chart(frame: pd.DataFrame, deadline_hours: int) -> go.Figure:
             yaxis="y2",
             mode="lines+markers",
             line={"color": CARBON_COLOR, "width": 2, "dash": "dash"},
-            marker={"size": 6, "symbol": "diamond"},
-            hovertemplate="%{y:.0f} gCO2/kWh<extra>Carbon</extra>",
+            marker={
+                "size": 7,
+                "symbol": ["diamond-open" if flag else "diamond" for flag in frame["carbon_estimated"]],
+                "line": {"width": 1.5, "color": CARBON_COLOR},
+            },
+            customdata=[" (estimated)" if flag else "" for flag in frame["carbon_estimated"]],
+            hovertemplate="%{y:.0f} gCO2/kWh%{customdata}<extra>Carbon</extra>",
         )
     )
 
@@ -305,6 +317,32 @@ def render_sidebar(regions: list[dict[str, str]]) -> dict[str, Any]:
     }
 
 
+def render_source_banner(schedule: dict[str, Any]) -> None:
+    """State where the grid data comes from and how much of it is estimated."""
+    hours = len(schedule["hours"])
+    if schedule.get("source_notice"):
+        st.warning(schedule["source_notice"])
+    if schedule["source"] == "simulation":
+        st.info(
+            "Grid data source: built-in simulation. Prices and carbon intensity are synthetic, "
+            "not live market data."
+        )
+        return
+    estimated_prices = schedule.get("estimated_price_hours", 0)
+    estimated_carbon = schedule.get("estimated_carbon_hours", 0)
+    st.success(
+        f"Grid data source: {schedule['source']}. "
+        f"Prices: {hours - estimated_prices} of {hours} hours are published day-ahead market prices"
+        + (
+            f", {estimated_prices} are estimates that reuse the same hour from the latest published day. "
+            if estimated_prices
+            else ". "
+        )
+        + f"Carbon intensity: {estimated_carbon} of {hours} hours are estimates calculated from the "
+        "most recent published fuel mix for the same hour of day."
+    )
+
+
 def render_kpis(schedule: dict[str, Any]) -> None:
     metrics = schedule["metrics"]
     required_hours = schedule["required_hours"]
@@ -363,6 +401,8 @@ def render_tables(frame: pd.DataFrame) -> None:
                 "Carbon (gCO2/kWh)": frame["carbon"],
                 "Stress score": frame["stress_score"],
                 "Grid stressed": frame["is_stressed"],
+                "Price estimated": frame["price_estimated"],
+                "Carbon estimated": frame["carbon_estimated"],
                 "Optimized: run": frame["run"].astype(bool),
                 "Baseline: run": frame["baseline_run"].astype(bool),
             }
@@ -433,11 +473,7 @@ def main() -> None:
         st.error(str(exc))
         st.stop()
 
-    if schedule["source"] == "simulation":
-        st.info(
-            "Grid data source: built-in simulation. Prices and carbon intensity are synthetic, "
-            "not live market data."
-        )
+    render_source_banner(schedule)
 
     render_kpis(schedule)
     st.caption(
@@ -451,6 +487,7 @@ def main() -> None:
     st.caption(
         "Green bars mark the hours when the GPUs run. Red ticks along the bottom mark stressed grid hours. "
         "Price uses the left axis and carbon intensity uses the right axis. "
+        "Hollow markers show estimated values. "
         "Select the baseline in the legend to compare."
     )
 

@@ -11,6 +11,7 @@ to run an AI training job.
 |------|---------|
 | `database.py` | Supabase client with automatic fallback to local SQLite |
 | `grid_client.py` | Grid data client and the built-in diurnal simulation engine |
+| `live_provider.py` | Live CAISO prices and EIA-based carbon intensity |
 | `solver.py` | PuLP (CBC) binary program, with an exact greedy fallback |
 | `main.py` | FastAPI backend |
 | `app.py` | Streamlit dashboard |
@@ -90,10 +91,38 @@ and uses SQLite.
 
 ## Grid data
 
-The only data source included is the simulation in `grid_client.py`. Its region
-parameters are illustrative, not measured market data. To connect a live feed,
-implement the `GridDataProvider` protocol and pass the provider to `GridClient`
-in `main.py`.
+VoltEdge has two data sources and picks one at startup.
+
+**Simulation (default).** Synthetic diurnal curves for CAISO, ERCOT, PJM, and
+NYISO. The region parameters are illustrative, not measured market data.
+
+**Live data for CAISO.** Enabled when `EIA_API_KEY` is set in `.env`.
+
+| Signal | Source | Key |
+|--------|--------|-----|
+| Price | CAISO day-ahead hourly LMP at one trading hub, read through the open-source `gridstatus` library | None |
+| Carbon intensity | EIA Open Data API v2, hourly generation by fuel type for the CISO balancing authority | Free key from https://www.eia.gov/opendata/register.php |
+
+Limits of the live data:
+
+* CAISO publishes the next day's prices in the afternoon. Until then, hours
+  past local midnight reuse the price of the same hour from the latest
+  published day and carry `price_estimated: true`.
+* EIA publishes the fuel mix several hours after the fact and offers no
+  forecast. Carbon intensity for each hour reuses the fuel mix of the same hour
+  of day from the latest published day and carries `carbon_estimated: true`.
+* Carbon intensity covers generation inside the balancing authority and ignores
+  imports. The emission factors in `live_provider.py` are approximations.
+* Other regions keep using the simulation, and the API says so in
+  `source_notice`.
+* If either feed fails, the API falls back to the simulation and reports the
+  reason in `source_notice`. Responses are cached for 15 minutes.
+
+Set `VOLTEDGE_GRID_SOURCE=simulation` to force the simulation. Set
+`VOLTEDGE_CAISO_NODE` to price a different node (default `TH_SP15_GEN-APND`).
+
+To add another live feed, implement the `GridDataProvider` protocol in
+`grid_client.py`.
 
 ## Tests
 
